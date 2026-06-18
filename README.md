@@ -27,14 +27,41 @@ curl -s -X POST http://localhost:8787/analyze \
 
 You get a verdict and a list of issues. In the example above, `utilize` and `optimize` come back as blocking errors with the plain replacements `use` and `improve`.
 
-## The API
+## Connect it as an MCP server
+
+An agent can connect to Prose-Agent as a Model Context Protocol server and get the `analyze_prose` tool. The endpoint speaks MCP over Streamable HTTP and is stateless, so there is no session to manage.
+
+```
+https://prose-agent.adityaperswal.workers.dev/mcp
+```
+
+Point any MCP client at that URL. For a client that takes JSON config, it looks like this:
+
+```json
+{
+  "mcpServers": {
+    "prose-agent": {
+      "url": "https://prose-agent.adityaperswal.workers.dev/mcp"
+    }
+  }
+}
+```
+
+The server exposes one tool, `analyze_prose`. It takes a `markdown` string plus the same options as the REST endpoint (`targetGrade`, `minSeverity`, `limit`, `offset`, `includeText`) and returns the full report as both text and structured content. The agent calls it, reads `verdict.clean`, fixes the issues, and calls again until the draft is clean.
+
+## The REST API
+
+If you would rather call it directly, the same engine is a plain REST API.
 
 | Method | Path | What it does |
 |--------|------|--------------|
+| `POST` | `/mcp` | MCP server (Streamable HTTP, stateless): `initialize`, `tools/list`, `tools/call`. |
 | `POST` | `/analyze` | Analyze markdown and return the full report. This is the loop endpoint. |
 | `GET` | `/checks` | The catalog of every check, with its severity and a fix hint. |
 | `GET` | `/health` | Liveness. |
 | `GET` | `/` | Plain-text usage. |
+
+Requests to `/analyze` and `/mcp` are rate limited per client IP (100 requests per 60 seconds by default). Over the limit returns `429` with a `Retry-After` header. Tune the limit in `wrangler.toml`.
 
 ### Request
 
