@@ -1,0 +1,9 @@
+name = "prose-agent"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
