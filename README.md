@@ -4,6 +4,8 @@ A deterministic API that reads a markdown draft and tells a coding agent exactly
 
 There is no model behind it. The same markdown always returns the same JSON, so an agent can loop on it without surprises.
 
+A live instance runs at `https://prose-agent.adityaperswal.workers.dev`. Try it: `curl https://prose-agent.adityaperswal.workers.dev/health`.
+
 It ports the readability engine from [Prose](https://github.com/aperswal): a Flesch-Kincaid grade plus six writing detectors. On top of that it adds deterministic style checks. Those catch filler and hedges, inflated vocabulary (with plain replacements), weasel attribution, and em dashes.
 
 ## Quickstart
@@ -126,10 +128,10 @@ The project is a Cloudflare Worker. Log in once, then deploy:
 
 ```bash
 pnpm exec wrangler login
-pnpm deploy
+pnpm run deploy
 ```
 
-`wrangler login` opens a browser to authorize your Cloudflare account. After that, `pnpm deploy` publishes the Worker and prints its public URL. Point your agent at `https://<your-worker>.workers.dev/analyze` and the loop works the same as it does locally.
+`wrangler login` opens a browser to authorize your Cloudflare account. After that, `pnpm run deploy` publishes the Worker and prints its public URL. Use `run` because pnpm has its own `deploy` command that would otherwise shadow the script. Point your agent at `https://<your-worker>.workers.dev/analyze` and the loop works the same as it does locally.
 
 ## Development
 
