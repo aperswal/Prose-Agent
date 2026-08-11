@@ -22,7 +22,26 @@ export type Category =
   | 'commaBut'
   | 'emDash'
   | 'midSentenceColon'
-  | 'tooManyCommas'
+  | 'commaSplice'
+  | 'runOnClauses'
+  | 'monotoneRhythm'
+  | 'noShortSentence'
+  | 'heavyWords'
+  | 'chopped'
+  | 'placeholderNoun'
+  | 'authenticityWord'
+  | 'comparisonFrame'
+  | 'ambiguousNecessity'
+  | 'meansThat'
+  | 'emphasisFragment'
+  | 'lateVerb'
+  | 'negationFirst'
+  | 'assertThenReverse'
+  | 'nounPile'
+  | 'nominalization'
+  | 'unknownAcronym'
+  | 'elegantVariation'
+  | 'modalDensity'
   | 'gradeTooHigh'
   | 'longParagraph'
   | 'wallOfText'
@@ -92,6 +111,21 @@ export interface Block {
   readonly text?: string
 }
 
+export interface VoiceAxis {
+  readonly value: number
+  readonly z: number
+  readonly targetMin: number | null
+  readonly targetMax: number | null
+  readonly inBand: boolean | null
+}
+
+export interface VoicePlacement {
+  readonly meanSentenceLength: VoiceAxis
+  readonly lengthVariance: VoiceAxis
+  readonly alternation: VoiceAxis
+  readonly wordWeight: VoiceAxis
+}
+
 export interface DocumentMetrics {
   readonly words: number
   readonly sentences: number
@@ -105,6 +139,7 @@ export interface DocumentMetrics {
   readonly adverbDensityPer100Words: number
   readonly passiveSentencePct: number
   readonly longestParagraphWords: number
+  readonly voicePlacement: VoicePlacement | null
 }
 
 export interface Verdict {

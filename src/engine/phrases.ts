@@ -40,6 +40,11 @@ const SIMPLE_SOURCES: readonly Source[] = [
   { category: 'throatClearing', phrases: W.throatClearing, position: 'sentenceStart' },
   { category: 'existenceStarter', phrases: W.existenceStarters, position: 'sentenceStart' },
   { category: 'frontLoadedNegative', phrases: W.frontLoadedNegatives, position: 'sentenceStart' },
+  { category: 'placeholderNoun', phrases: W.placeholderNouns, position: 'anywhere' },
+  { category: 'comparisonFrame', phrases: W.comparisonFrames, position: 'anywhere' },
+  { category: 'ambiguousNecessity', phrases: W.ambiguousNecessityPhrases, position: 'anywhere' },
+  { category: 'meansThat', phrases: W.meansThatPhrases, position: 'anywhere' },
+  { category: 'weakCloser', phrases: W.closingRestatements, position: 'sentenceStart' },
 ]
 
 function buildTable(): { table: ReadonlyMap<string, PhraseDef>; maxWords: number } {

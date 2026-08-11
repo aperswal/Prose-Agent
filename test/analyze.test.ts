@@ -84,12 +84,204 @@ describe('convergence gate', () => {
     expect(r.verdict.clean).toBe(false)
   })
 
-  it('a 35 word sentence is a blocking long sentence', () => {
-    const long = `${Array.from({ length: 35 }, (_, i) => `word${i}`).join(' ')}.`
+  it('a 46 word sentence is a blocking long sentence', () => {
+    const long = `${Array.from({ length: 46 }, (_, i) => `word${i}`).join(' ')}.`
     const r = analyze(long, { targetGrade: 99 })
     const issue = r.issues.find((i) => i.category === 'longSentence')
     expect(issue?.severity).toBe('error')
     expect(issue?.editTarget.replaceSpan.start).toBe(0)
+  })
+
+  it('a lone 35 word sentence is no longer flagged', () => {
+    const long = `${Array.from({ length: 35 }, (_, i) => `word${i}`).join(' ')}.`
+    const r = analyze(long, { targetGrade: 99 })
+    expect(r.issues.some((i) => i.category === 'longSentence' || i.category === 'mediumSentence')).toBe(false)
+  })
+
+  it('a 35 word sentence warns only inside an already-long stretch', () => {
+    const s = (n: number): string => `${Array.from({ length: n }, (_, i) => `word${i}`).join(' ')}.`
+    const longStretch = analyze(`${s(28)} ${s(27)} ${s(29)} ${s(35)}`, { targetGrade: 99 })
+    expect(longStretch.issues.some((i) => i.category === 'mediumSentence')).toBe(true)
+    const withRelief = analyze(`${s(6)} ${s(8)} ${s(35)}`, { targetGrade: 99 })
+    expect(withRelief.issues.some((i) => i.category === 'mediumSentence')).toBe(false)
+  })
+})
+
+describe('comma splices and run-ons', () => {
+  it('flags a comma splice between two full clauses', () => {
+    const r = analyze('The product launched, it broke immediately.', { targetGrade: 99 })
+    const issue = r.issues.find((i) => i.category === 'commaSplice')
+    expect(issue?.severity).toBe('error')
+  })
+
+  it('does not flag an introductory clause', () => {
+    expect(categories('When it rains, it pours.')).not.toContain('commaSplice')
+    expect(categories('After the launch, we celebrated the release.')).not.toContain('commaSplice')
+  })
+
+  it('does not flag dialogue attribution', () => {
+    expect(categories('"We are done," she said.')).not.toContain('commaSplice')
+  })
+
+  it('does not flag a comma before a coordinating conjunction', () => {
+    expect(categories('We shipped it, but it broke.')).not.toContain('commaSplice')
+  })
+
+  it('flags clauses strung together with commas', () => {
+    const md =
+      'The team shipped the release, the users complained loudly, support escalated every ticket, engineering reverted the deploy, nobody slept that night.'
+    expect(categories(md, { targetGrade: 99 })).toContain('runOnClauses')
+  })
+
+  it('does not flag a plain series', () => {
+    expect(categories('We ship to France, Canada, Mexico, Brazil, and Chile.', { targetGrade: 99 })).not.toContain(
+      'runOnClauses',
+    )
+  })
+})
+
+describe('tier 1 phrase checks', () => {
+  it('flags placeholder nouns', () => {
+    expect(categories('The parser gives you a way to store structure.', { targetGrade: 99 })).toContain(
+      'placeholderNoun',
+    )
+    expect(categories('No mechanism exists for declaring that.', { targetGrade: 99 })).not.toContain('placeholderNoun')
+  })
+
+  it('flags authenticity words but not whitelisted uses', () => {
+    expect(categories('The genuine fix is simpler.', { targetGrade: 99 })).toContain('authenticityWord')
+    expect(categories('The real number line is dense.', { targetGrade: 99 })).not.toContain('authenticityWord')
+  })
+
+  it('flags comparison frames', () => {
+    expect(categories('A document is like a tree of nodes.', { targetGrade: 99 })).toContain('comparisonFrame')
+  })
+
+  it('flags ambiguous necessity as info', () => {
+    const r = analyze('You need a schema for this.', { targetGrade: 99 })
+    const issue = r.issues.find((i) => i.category === 'ambiguousNecessity')
+    expect(issue?.severity).toBe('info')
+  })
+
+  it('flags means-that conditionals', () => {
+    expect(categories('A conflict means that both copies changed.', { targetGrade: 99 })).toContain('meansThat')
+  })
+
+  it('flags closing restatements as weak closers', () => {
+    expect(categories('In summary, the tree wins.', { targetGrade: 99 })).toContain('weakCloser')
+  })
+
+  it('flags emphasis fragments but not short claim sentences', () => {
+    expect(categories('The cache invalidates itself. It works.', { targetGrade: 99 })).toContain('emphasisFragment')
+    expect(categories('Two options exist.', { targetGrade: 99 })).not.toContain('emphasisFragment')
+  })
+})
+
+describe('tier 2 token checks', () => {
+  it('flags a pseudo-cleft late verb but not a question', () => {
+    expect(
+      categories('What the browser does when the user presses Enter differs between engines.', { targetGrade: 99 }),
+    ).toContain('lateVerb')
+    expect(categories('What is a monad?', { targetGrade: 99 })).not.toContain('lateVerb')
+  })
+
+  it('flags negation before affirmation', () => {
+    expect(
+      categories('The markup is not a stored document, it is a record of browser behavior.', { targetGrade: 99 }),
+    ).toContain('negationFirst')
+  })
+
+  it('flags assert-then-reverse', () => {
+    expect(
+      categories('This looks like it solves the problem, but it does not.', { targetGrade: 99 }),
+    ).toContain('assertThenReverse')
+    expect(categories('This looks like a tree.', { targetGrade: 99 })).not.toContain('assertThenReverse')
+  })
+
+  it('flags a four-noun pile and passes the unpacked version', () => {
+    expect(categories('The multi-step character composition pipeline broke.', { targetGrade: 99 })).toContain(
+      'nounPile',
+    )
+    expect(
+      categories('The way Japanese input combines several keystrokes into one character.', { targetGrade: 99 }),
+    ).not.toContain('nounPile')
+  })
+
+  it('flags weak-verb nominalizations with the verb as replacement', () => {
+    const r = analyze('Those four changes give convergence.', { targetGrade: 99 })
+    const issue = r.issues.find((i) => i.category === 'nominalization')
+    expect(issue?.replacement).toBe('converge')
+    expect(categories('We perform a validation at the boundary.', { targetGrade: 99 })).toContain('nominalization')
+    expect(categories('The validation runs at the boundary.', { targetGrade: 99 })).not.toContain('nominalization')
+  })
+
+  it('flags unknown acronyms once but not allowlisted or introduced ones', () => {
+    const r = analyze('The DSL spec drives the generator. The DSL output is typed.', { targetGrade: 99 })
+    expect(r.issues.filter((i) => i.category === 'unknownAcronym')).toHaveLength(1)
+    expect(categories('The API returns JSON.', { targetGrade: 99 })).not.toContain('unknownAcronym')
+    expect(
+      categories('Data structures with this property are called CRDTs. Every CRDT converges.', { targetGrade: 99 }),
+    ).not.toContain('unknownAcronym')
+  })
+
+  it('flags three acronyms in one paragraph with a density hint', () => {
+    const r = analyze('The DSL feeds the AST into the IR before lowering.', { targetGrade: 99 })
+    const density = r.issues.find((i) => i.category === 'unknownAcronym' && i.fixHint.includes('Rewrite with words'))
+    expect(density).toBeDefined()
+  })
+
+  it('flags elegant variation across the document', () => {
+    const md = 'Each browser produces different markup. Whatever markup the program emitted gets stored.'
+    const r = analyze(md, { targetGrade: 99 })
+    const issue = r.issues.find((i) => i.category === 'elegantVariation')
+    expect(issue?.fixHint).toContain('produce')
+  })
+
+  it('flags modal density over long modal-heavy text', () => {
+    const md = Array.from(
+      { length: 8 },
+      () => 'The cache can fail here, the disk may fill there, and the network might drop.',
+    ).join(' ')
+    expect(categories(md, { targetGrade: 99, limit: 1000 })).toContain('modalDensity')
+  })
+})
+
+describe('rhythm', () => {
+  const s = (n: number, tag: string): string => `${Array.from({ length: n }, (_, i) => `${tag}${i}`).join(' ')}.`
+
+  it('flags a monotone run with a located recommendation', () => {
+    const md = Array.from({ length: 6 }, (_, k) => s(15, `w${k}x`)).join(' ')
+    const r = analyze(md, { targetGrade: 99 })
+    const issue = r.issues.find((i) => i.category === 'monotoneRhythm')
+    expect(issue).toBeDefined()
+    expect(issue?.fixHint).toContain('sentences in a row')
+  })
+
+  it('flags a long stretch with no short sentence, anchored at the shortest', () => {
+    const lens = [12, 18, 24, 12, 19, 25, 13, 20, 26, 14]
+    const md = lens.map((n, k) => s(n, `q${k}x`)).join(' ')
+    const r = analyze(md, { targetGrade: 99 })
+    const issue = r.issues.find((i) => i.category === 'noShortSentence')
+    expect(issue).toBeDefined()
+    expect(issue?.fixHint).toContain('shortest')
+  })
+
+  it('varied writing raises no rhythm findings', () => {
+    const lens = [5, 22, 9, 30, 6, 17, 11, 26]
+    const md = lens.map((n, k) => s(n, `v${k}x`)).join(' ')
+    const r = analyze(md, { targetGrade: 99 })
+    expect(r.issues.some((i) => i.category === 'monotoneRhythm')).toBe(false)
+    expect(r.issues.some((i) => i.category === 'noShortSentence')).toBe(false)
+    expect(r.issues.some((i) => i.category === 'chopped')).toBe(false)
+  })
+
+  it('reports voice placement once a document has enough sentences', () => {
+    const md = Array.from({ length: 8 }, (_, k) => s(15, `p${k}x`)).join(' ')
+    const vp = analyze(md).document.metrics.voicePlacement
+    expect(vp).not.toBeNull()
+    expect(typeof vp?.lengthVariance.z).toBe('number')
+    expect(vp?.wordWeight.targetMax).toBe(-1)
+    expect(analyze('One line. Two lines here.').document.metrics.voicePlacement).toBeNull()
   })
 })
 

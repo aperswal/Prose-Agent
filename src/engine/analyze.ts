@@ -9,6 +9,8 @@ import type {
   Severity,
   Span,
   Verdict,
+  VoiceAxis,
+  VoicePlacement,
 } from './types.js'
 import { DEFAULT_OPTIONS, type AnalyzeOptionsInput } from './types.js'
 import { parseDocument, mapOffset, type ParsedBlock, type ProseContent } from './markdown.js'
@@ -16,6 +18,13 @@ import { tokenizeSentences, type Sentence } from './tokenize.js'
 import { score, round1, gradeLabel } from './readability.js'
 import { runBlockChecks, type RawFinding } from './checks.js'
 import { CATEGORY_ORDER, meta, priority } from './registry.js'
+import {
+  acronymAllowlist,
+  acronymIntroducers,
+  modalVerbs,
+  subjectPronouns,
+  synonymSets,
+} from './wordlists.js'
 
 interface PreIssue {
   category: Category
@@ -26,6 +35,7 @@ interface PreIssue {
   editStart: number
   editEnd: number
   replacement: string | null
+  fixHint?: string
 }
 
 interface BlockData {
@@ -58,6 +68,14 @@ const OVERLAP_GROUP = new Set<Category>([
   'existenceStarter',
   'frontLoadedNegative',
   'adverb',
+  'heavyWords',
+  'placeholderNoun',
+  'authenticityWord',
+  'comparisonFrame',
+  'ambiguousNecessity',
+  'meansThat',
+  'nominalization',
+  'elegantVariation',
 ])
 
 function cmp(a: number, b: number): number {
@@ -169,6 +187,311 @@ function repeatedStartFindings(blocks: BlockData[]): { blockIndex: number; findi
   return out
 }
 
+interface FlatSentence {
+  blockIndex: number
+  sentenceIndex: number
+  sentence: Sentence
+  length: number
+}
+
+function flattenSentences(blocks: BlockData[]): FlatSentence[] {
+  const flat: FlatSentence[] = []
+  for (const b of blocks) {
+    if (!b.prose) continue
+    b.sentences.forEach((s, si) => {
+      flat.push({ blockIndex: b.index, sentenceIndex: si, sentence: s, length: s.words.length })
+    })
+  }
+  return flat
+}
+
+function anchorFinding(item: FlatSentence, category: Category, fixHint: string): { blockIndex: number; finding: RawFinding } {
+  return {
+    blockIndex: item.blockIndex,
+    finding: {
+      category,
+      aStart: item.sentence.start,
+      aEnd: item.sentence.end,
+      editAStart: item.sentence.start,
+      editAEnd: item.sentence.end,
+      sentenceIndex: item.sentenceIndex,
+      replacement: null,
+      fixHint,
+    },
+  }
+}
+
+const MONOTONE_RUN = 5
+const MONOTONE_SPREAD = 5
+const NO_SHORT_STRETCH = 10
+const SHORT_WORDS = 12
+const CHOPPED_STRETCH = 8
+const CHOPPED_MAX = 18
+const CHOPPED_MEAN = 14
+
+function monotoneFindings(flat: FlatSentence[]): { blockIndex: number; finding: RawFinding }[] {
+  const out: { blockIndex: number; finding: RawFinding }[] = []
+  let i = 0
+  while (i < flat.length) {
+    const anchor = (flat[i] as FlatSentence).length
+    let j = i + 1
+    while (j < flat.length && Math.abs((flat[j] as FlatSentence).length - anchor) <= MONOTONE_SPREAD) j += 1
+    const run = j - i
+    if (run >= MONOTONE_RUN) {
+      const lengths = flat.slice(i, j).map((f) => f.length)
+      const min = Math.min(...lengths)
+      const max = Math.max(...lengths)
+      const mid = flat[i + (run >> 1)] as FlatSentence
+      out.push(
+        anchorFinding(
+          mid,
+          'monotoneRhythm',
+          `${run} sentences in a row run ${min}–${max} words. Vary this one: cut it under 10 words or merge it into a neighbor.`,
+        ),
+      )
+      i = j
+    } else {
+      i += 1
+    }
+  }
+  return out
+}
+
+function noShortFindings(flat: FlatSentence[]): { blockIndex: number; finding: RawFinding }[] {
+  const out: { blockIndex: number; finding: RawFinding }[] = []
+  let i = 0
+  while (i < flat.length) {
+    if ((flat[i] as FlatSentence).length < SHORT_WORDS) {
+      i += 1
+      continue
+    }
+    let j = i
+    while (j < flat.length && (flat[j] as FlatSentence).length >= SHORT_WORDS) j += 1
+    const stretch = j - i
+    if (stretch >= NO_SHORT_STRETCH) {
+      let shortest = flat[i] as FlatSentence
+      for (let k = i + 1; k < j; k += 1) {
+        if ((flat[k] as FlatSentence).length < shortest.length) shortest = flat[k] as FlatSentence
+      }
+      out.push(
+        anchorFinding(
+          shortest,
+          'noShortSentence',
+          `${stretch} sentences with none under ${SHORT_WORDS} words. This is the shortest (${shortest.length} words); cut it to its main clause.`,
+        ),
+      )
+    }
+    i = j
+  }
+  return out
+}
+
+function choppedFindings(flat: FlatSentence[]): { blockIndex: number; finding: RawFinding }[] {
+  const out: { blockIndex: number; finding: RawFinding }[] = []
+  let i = 0
+  while (i < flat.length) {
+    if ((flat[i] as FlatSentence).length > CHOPPED_MAX) {
+      i += 1
+      continue
+    }
+    let j = i
+    while (j < flat.length && (flat[j] as FlatSentence).length <= CHOPPED_MAX) j += 1
+    const stretch = j - i
+    if (stretch >= CHOPPED_STRETCH) {
+      const mean = flat.slice(i, j).reduce((a, f) => a + f.length, 0) / stretch
+      if (mean < CHOPPED_MEAN) {
+        let anchor = flat[i + (stretch >> 1)] as FlatSentence
+        let hint = `${stretch} short sentences in a row with no build. Merge two adjacent ones that share a subject.`
+        for (let k = i + 1; k < j; k += 1) {
+          const item = flat[k] as FlatSentence
+          const firstWord = item.sentence.words[0]
+          if (firstWord && subjectPronouns.has(firstWord.text.toLowerCase())) {
+            anchor = item
+            hint = `${stretch} short sentences in a row with no build. This one starts with a pronoun; merge it into the previous sentence.`
+            break
+          }
+        }
+        out.push(anchorFinding(anchor, 'chopped', hint))
+      }
+    }
+    i = j
+  }
+  return out
+}
+
+function rhythmFindings(blocks: BlockData[]): { blockIndex: number; finding: RawFinding }[] {
+  const flat = flattenSentences(blocks)
+  return [...monotoneFindings(flat), ...noShortFindings(flat), ...choppedFindings(flat)]
+}
+
+interface FlatWord {
+  blockIndex: number
+  sentenceIndex: number
+  word: Sentence['words'][number]
+  prev: Sentence['words'][number] | null
+  prevPrev: Sentence['words'][number] | null
+  precededByParen: boolean
+}
+
+function flattenWords(blocks: BlockData[]): FlatWord[] {
+  const flat: FlatWord[] = []
+  for (const b of blocks) {
+    const prose = b.prose
+    if (!prose) continue
+    b.sentences.forEach((s, si) => {
+      s.words.forEach((w, wi) => {
+        flat.push({
+          blockIndex: b.index,
+          sentenceIndex: si,
+          word: w,
+          prev: wi > 0 ? (s.words[wi - 1] as Sentence['words'][number]) : null,
+          prevPrev: wi > 1 ? (s.words[wi - 2] as Sentence['words'][number]) : null,
+          precededByParen: w.start > 0 && prose.text[w.start - 1] === '(',
+        })
+      })
+    })
+  }
+  return flat
+}
+
+function wordFinding(item: FlatWord, category: Category, fixHint?: string): { blockIndex: number; finding: RawFinding } {
+  return {
+    blockIndex: item.blockIndex,
+    finding: {
+      category,
+      aStart: item.word.start,
+      aEnd: item.word.end,
+      editAStart: item.word.start,
+      editAEnd: item.word.end,
+      sentenceIndex: item.sentenceIndex,
+      replacement: null,
+      ...(fixHint !== undefined ? { fixHint } : {}),
+    },
+  }
+}
+
+const ACRONYM_DENSITY = 3
+
+function isAcronymToken(text: string): boolean {
+  if (!/^[A-Za-z]{2,6}$/.test(text)) return false
+  let caps = 0
+  for (const ch of text) if (ch >= 'A' && ch <= 'Z') caps += 1
+  return caps >= 2
+}
+
+function acronymKey(text: string): string {
+  return text.endsWith('s') ? text.slice(0, -1) : text
+}
+
+function acronymFindings(flat: FlatWord[]): { blockIndex: number; finding: RawFinding }[] {
+  const introduced = new Set<string>()
+  for (const item of flat) {
+    if (!isAcronymToken(item.word.text)) continue
+    const prev = item.prev ? item.prev.text.toLowerCase() : null
+    const prevPrev = item.prevPrev ? item.prevPrev.text.toLowerCase() : null
+    if (
+      item.precededByParen ||
+      (prev !== null && acronymIntroducers.has(prev)) ||
+      (prev === 'as' && prevPrev === 'known')
+    ) {
+      introduced.add(acronymKey(item.word.text))
+    }
+  }
+  const out: { blockIndex: number; finding: RawFinding }[] = []
+  const seen = new Set<string>()
+  const perBlock = new Map<number, Set<string>>()
+  for (const item of flat) {
+    const raw = item.word.text
+    if (!isAcronymToken(raw)) continue
+    const text = acronymKey(raw)
+    if (acronymAllowlist.has(raw) || acronymAllowlist.has(text) || introduced.has(text)) continue
+    if (!seen.has(text)) {
+      seen.add(text)
+      out.push(wordFinding(item, 'unknownAcronym'))
+    }
+    const blockSet = perBlock.get(item.blockIndex) ?? new Set<string>()
+    if (!blockSet.has(text)) {
+      blockSet.add(text)
+      perBlock.set(item.blockIndex, blockSet)
+      if (blockSet.size === ACRONYM_DENSITY) {
+        out.push(
+          wordFinding(
+            item,
+            'unknownAcronym',
+            `${ACRONYM_DENSITY} acronyms in this paragraph. Rewrite with words.`,
+          ),
+        )
+      }
+    }
+  }
+  return out
+}
+
+const SYNONYM_LOOKUP = new Map<string, { set: number; lemma: string }>(
+  synonymSets.flatMap((set, si) =>
+    set.flatMap((forms) => forms.map((form) => [form, { set: si, lemma: forms[0] as string }] as const)),
+  ),
+)
+
+function variationFindings(flat: FlatWord[]): { blockIndex: number; finding: RawFinding }[] {
+  const out: { blockIndex: number; finding: RawFinding }[] = []
+  const firstLemma = new Map<number, string>()
+  const flagged = new Set<number>()
+  for (const item of flat) {
+    const hit = SYNONYM_LOOKUP.get(item.word.text.toLowerCase())
+    if (!hit || item.word.isProperNoun) continue
+    const existing = firstLemma.get(hit.set)
+    if (existing === undefined) {
+      firstLemma.set(hit.set, hit.lemma)
+    } else if (existing !== hit.lemma && !flagged.has(hit.set)) {
+      flagged.add(hit.set)
+      out.push(
+        wordFinding(
+          item,
+          'elegantVariation',
+          `'${existing}' appears earlier in the document. If both name the same action, keep one.`,
+        ),
+      )
+    }
+  }
+  return out
+}
+
+const MODAL_MIN_WORDS = 100
+const MODAL_PER_100 = 3
+
+function modalFindings(flat: FlatWord[]): { blockIndex: number; finding: RawFinding }[] {
+  if (flat.length < MODAL_MIN_WORDS) return []
+  const modals = flat.filter(
+    (item) => modalVerbs.has(item.word.text.toLowerCase()) && !item.word.isProperNoun,
+  )
+  const density = (modals.length / flat.length) * 100
+  if (density <= MODAL_PER_100) return []
+  const countByBlock = new Map<number, number>()
+  for (const m of modals) countByBlock.set(m.blockIndex, (countByBlock.get(m.blockIndex) ?? 0) + 1)
+  let heaviest = -1
+  let heaviestCount = 0
+  for (const [blockIndex, count] of countByBlock) {
+    if (count > heaviestCount || (count === heaviestCount && blockIndex < heaviest)) {
+      heaviest = blockIndex
+      heaviestCount = count
+    }
+  }
+  const anchor = modals.find((m) => m.blockIndex === heaviest) as FlatWord
+  return [
+    wordFinding(
+      anchor,
+      'modalDensity',
+      `${modals.length} modals in ${flat.length} words. Check each can, may and might against whether the plain assertion is true.`,
+    ),
+  ]
+}
+
+function lexiconFindings(blocks: BlockData[]): { blockIndex: number; finding: RawFinding }[] {
+  const flat = flattenWords(blocks)
+  return [...acronymFindings(flat), ...variationFindings(flat), ...modalFindings(flat)]
+}
+
 function collapseOverlaps(pre: PreIssue[]): PreIssue[] {
   const removed = new Set<number>()
   const byBlock = new Map<number, number[]>()
@@ -230,6 +553,12 @@ export function analyze(markdown: string, options: AnalyzeOptionsInput = {}): An
   for (const { blockIndex, finding } of repeatedStartFindings(blocks)) {
     ;(proseFindingsByBlock[blockIndex] as RawFinding[]).push(finding)
   }
+  for (const { blockIndex, finding } of rhythmFindings(blocks)) {
+    ;(proseFindingsByBlock[blockIndex] as RawFinding[]).push(finding)
+  }
+  for (const { blockIndex, finding } of lexiconFindings(blocks)) {
+    ;(proseFindingsByBlock[blockIndex] as RawFinding[]).push(finding)
+  }
 
   for (const b of blocks) {
     const prose = b.prose
@@ -248,6 +577,7 @@ export function analyze(markdown: string, options: AnalyzeOptionsInput = {}): An
         editStart: mapOffset(prose, f.editAStart, false),
         editEnd: mapOffset(prose, f.editAEnd, true),
         replacement: f.replacement,
+        ...(f.fixHint !== undefined ? { fixHint: f.fixHint } : {}),
       })
     }
     b.passiveSentenceCount = passiveSentences.size
@@ -286,7 +616,7 @@ export function analyze(markdown: string, options: AnalyzeOptionsInput = {}): An
       severity: m.severity,
       blocksClean: m.blocksClean,
       message: m.message,
-      fixHint: m.fixHint,
+      fixHint: p.fixHint ?? m.fixHint,
       span: spanOf(lineStarts, p.rawStart, p.rawEnd),
       excerpt,
       replacement: p.replacement,
@@ -329,6 +659,42 @@ function blockFinding(category: Category, b: BlockData): PreIssue {
   }
 }
 
+const VOICE_MIN_SENTENCES = 8
+const VOICE_NORMS = {
+  meanSentenceLength: { mean: 21.4, sd: 4.2, targetMin: null, targetMax: null },
+  lengthVariance: { mean: 0.51, sd: 0.14, targetMin: 0.5, targetMax: 1.5 },
+  alternation: { mean: 0.52, sd: 0.12, targetMin: 0.5, targetMax: 1.5 },
+  wordWeight: { mean: 1.72, sd: 0.15, targetMin: -1.5, targetMax: -1 },
+} as const
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100
+}
+
+function voiceAxis(value: number, norm: (typeof VOICE_NORMS)[keyof typeof VOICE_NORMS]): VoiceAxis {
+  const z = (value - norm.mean) / norm.sd
+  const inBand =
+    norm.targetMin === null || norm.targetMax === null ? null : z >= norm.targetMin && z <= norm.targetMax
+  return { value: round2(value), z: round2(z), targetMin: norm.targetMin, targetMax: norm.targetMax, inBand }
+}
+
+function buildVoicePlacement(sentenceLengths: number[], syllables: number, words: number): VoicePlacement | null {
+  if (sentenceLengths.length < VOICE_MIN_SENTENCES || words === 0) return null
+  const meanLen = sentenceLengths.reduce((a, b) => a + b, 0) / sentenceLengths.length
+  const cv = meanLen > 0 ? stdDev(sentenceLengths) / meanLen : 0
+  let deltaSum = 0
+  for (let i = 1; i < sentenceLengths.length; i += 1) {
+    deltaSum += Math.abs((sentenceLengths[i] as number) - (sentenceLengths[i - 1] as number))
+  }
+  const alternation = meanLen > 0 ? deltaSum / (sentenceLengths.length - 1) / meanLen : 0
+  return {
+    meanSentenceLength: voiceAxis(meanLen, VOICE_NORMS.meanSentenceLength),
+    lengthVariance: voiceAxis(cv, VOICE_NORMS.lengthVariance),
+    alternation: voiceAxis(alternation, VOICE_NORMS.alternation),
+    wordWeight: voiceAxis(syllables / words, VOICE_NORMS.wordWeight),
+  }
+}
+
 function buildDocumentMetrics(blocks: BlockData[]): DocumentMetrics {
   const allWords: string[] = []
   const sentenceLengths: number[] = []
@@ -368,6 +734,7 @@ function buildDocumentMetrics(blocks: BlockData[]): DocumentMetrics {
     adverbDensityPer100Words: words > 0 ? round1((adverbs / words) * 100) : 0,
     passiveSentencePct: sentences > 0 ? round1((passiveSentences / sentences) * 100) : 0,
     longestParagraphWords,
+    voicePlacement: buildVoicePlacement(sentenceLengths, readability.syllables, words),
   }
 }
 
